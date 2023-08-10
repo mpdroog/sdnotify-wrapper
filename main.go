@@ -107,6 +107,7 @@ func main() {
 	}
 
 	proxySock := os.Args[1]
+	proxyPid := proxySock + ".pid"
 
 	sigs = make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGCHLD)
@@ -136,11 +137,17 @@ func main() {
 		select {
 		case <-ready:
 			// Client says it can fly without us
+			pid := proc.Pid
+			err = os.WriteFile(proxyPid, []byte(fmt.Sprintf("%d", pid)), 0600)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "proc saving pid failed: %v\n", err)
+			}
 			err = proc.Release()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "proc release failed: %v\n", err)
 			}
 			closing = true
+			fmt.Printf("%d\n", pid)
 			return
 
 		case sig := <-sigs:
