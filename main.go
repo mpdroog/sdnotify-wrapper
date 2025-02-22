@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 var (
+	verbose bool
 	sigs    chan os.Signal
 	closing bool
 )
@@ -101,6 +103,9 @@ func forkExec(argv []string) (*os.Process, error) {
 }
 
 func main() {
+	if os.Getenv("VERBOSE") == "1" {
+		verbose = true
+	}
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: %s proxy-socket cmd ...\n", os.Args[0])
 		os.Exit(1)
@@ -113,13 +118,20 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGCHLD)
 
 	os.Setenv("NOTIFY_SOCKET", proxySock)
+	if verbose {
+		fmt.Printf("NOTIFY_SOCKET=%s\n", proxySock)
+	}
 
 	proxy, err := newProxy(proxySock)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating proxy: %v\n", err)
 		os.Exit(1)
 	}
-	defer proxy.Close() // ignoring socket close and failure to delete here
+	defer func() {
+		if err := proxy.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error closing proxy: %v\n", err)
+		}
+	}()
 
 	// fork/exec
 	proc, err := forkExec(os.Args[2:len(os.Args)])
@@ -133,10 +145,25 @@ func main() {
 	ready := make(chan struct{})
 	go proxy.run(cancel, ready)
 
+	timeout := time.After(1 * time.Minute)
 	for {
+		if verbose {
+			fmt.Printf("Await signal\n")
+		}
+
 		select {
+		case <-timeout:
+			if verbose {
+				fmt.Printf("Timeout signal\n")
+			}
+			proc.Signal(syscall.SIGTERM)
+			fmt.Fprintf(os.Stderr, "proc 1min timeout\n")
+			os.Exit(1)
 		case <-ready:
 			// Client says it can fly without us
+			if verbose {
+				fmt.Printf("Ready signal\n")
+			}
 			pid := proc.Pid
 			err = os.WriteFile(proxyPid, []byte(fmt.Sprintf("%d", pid)), 0600)
 			if err != nil {
@@ -148,10 +175,14 @@ func main() {
 			}
 			closing = true
 			fmt.Printf("%d\n", pid)
+			os.Exit(0) // TODO?
 			return
 
 		case sig := <-sigs:
 			// We got interrupted by OS, cancel all
+			if verbose {
+				fmt.Printf("Interrupt signal\n")
+			}
 			switch sig {
 			case syscall.SIGINT, syscall.SIGTERM:
 				// propogate to child
